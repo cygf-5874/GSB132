@@ -54,8 +54,7 @@ func (tr *Tree) Height() int { return tr.height }
 func (tr *Tree) Get(key int) (string, bool) {
 	n := tr.root
 	for !n.leaf {
-		i := upperBound(n.keys, key)
-		n = n.children[i]
+		n = n.children[upperBound(n.keys, key)]
 	}
 	i := sort.SearchInts(n.keys, key)
 	if i < len(n.keys) && n.keys[i] == key {
@@ -66,7 +65,10 @@ func (tr *Tree) Get(key int) (string, bool) {
 
 // Insert 插入一个键值对。键已存在时返回 false。
 func (tr *Tree) Insert(key int, value string) bool {
-	pk, right, split := tr.insert(tr.root, key, value)
+	inserted, pk, right, split := tr.insert(tr.root, key, value)
+	if !inserted {
+		return false
+	}
 	if split {
 		tr.root = &node{keys: []int{pk}, children: []*node{tr.root, right}}
 		tr.height++
@@ -75,32 +77,39 @@ func (tr *Tree) Insert(key int, value string) bool {
 	return true
 }
 
-func (tr *Tree) insert(n *node, key int, value string) (int, *node, bool) {
+// insert 递归插入。inserted 表示键是否为新键；split 为 true 时
+// pk/right 是提升到父节点的分隔键与新建的右兄弟。
+func (tr *Tree) insert(n *node, key int, value string) (inserted bool, pk int, right *node, split bool) {
 	if n.leaf {
-		i := lowerBound(n.keys, key)
+		i := sort.SearchInts(n.keys, key)
+		if i < len(n.keys) && n.keys[i] == key {
+			return false, 0, nil, false
+		}
 		n.keys = insertInt(n.keys, i, key)
 		n.vals = insertStr(n.vals, i, value)
 		if len(n.keys) <= 2*tr.t-1 {
-			return 0, nil, false
+			return true, 0, nil, false
 		}
-		return tr.splitLeaf(n)
+		pk, right := tr.splitLeaf(n)
+		return true, pk, right, true
 	}
 
 	i := upperBound(n.keys, key)
-	pk, right, split := tr.insert(n.children[i], key, value)
-	if !split {
-		return 0, nil, false
+	inserted, pk, right, split = tr.insert(n.children[i], key, value)
+	if !inserted || !split {
+		return inserted, 0, nil, false
 	}
 
 	n.keys = insertInt(n.keys, i, pk)
-	n.children = append(n.children, right)
+	n.children = insertNode(n.children, i+1, right)
 	if len(n.keys) <= 2*tr.t-1 {
-		return 0, nil, false
+		return true, 0, nil, false
 	}
-	return tr.splitInternal(n)
+	pk, right = tr.splitInternal(n)
+	return true, pk, right, true
 }
 
-func (tr *Tree) splitLeaf(n *node) (int, *node, bool) {
+func (tr *Tree) splitLeaf(n *node) (int, *node) {
 	mid := len(n.keys) / 2
 	right := &node{
 		leaf: true,
@@ -109,10 +118,10 @@ func (tr *Tree) splitLeaf(n *node) (int, *node, bool) {
 	}
 	n.keys = n.keys[:mid]
 	n.vals = n.vals[:mid]
-	return right.keys[0], right, true
+	return right.keys[0], right
 }
 
-func (tr *Tree) splitInternal(n *node) (int, *node, bool) {
+func (tr *Tree) splitInternal(n *node) (int, *node) {
 	mid := len(n.keys) / 2
 	pk := n.keys[mid]
 	right := &node{
@@ -121,16 +130,20 @@ func (tr *Tree) splitInternal(n *node) (int, *node, bool) {
 	}
 	n.keys = n.keys[:mid]
 	n.children = n.children[:mid+1]
-	return pk, right, true
+	return pk, right
 }
 
 // Delete 删除一个键。键不存在时返回 false。
 func (tr *Tree) Delete(key int) bool {
-	ok := tr.delete(tr.root, key)
-	if ok {
-		tr.size--
+	if !tr.delete(tr.root, key) {
+		return false
 	}
-	return ok
+	tr.size--
+	for !tr.root.leaf && len(tr.root.keys) == 0 {
+		tr.root = tr.root.children[0]
+		tr.height--
+	}
+	return true
 }
 
 func (tr *Tree) delete(n *node, key int) bool {
@@ -143,18 +156,99 @@ func (tr *Tree) delete(n *node, key int) bool {
 		n.vals = append(n.vals[:i], n.vals[i+1:]...)
 		return true
 	}
+
 	i := upperBound(n.keys, key)
-	return tr.delete(n.children[i], key)
+	if !tr.delete(n.children[i], key) {
+		return false
+	}
+	if len(n.children[i].keys) < tr.t-1 {
+		tr.rebalance(n, i)
+	}
+	return true
+}
+
+// rebalance 处理内部节点 n 的第 i 个孩子发生的下溢：先尝试向
+// 左右兄弟借位，借不到就与兄弟合并。叶子借位/合并会同步维护分隔键。
+func (tr *Tree) rebalance(n *node, i int) {
+	child := n.children[i]
+
+	if i > 0 && len(n.children[i-1].keys) > tr.t-1 {
+		left := n.children[i-1]
+		if child.leaf {
+			k := left.keys[len(left.keys)-1]
+			v := left.vals[len(left.vals)-1]
+			left.keys = left.keys[:len(left.keys)-1]
+			left.vals = left.vals[:len(left.vals)-1]
+			child.keys = append([]int{k}, child.keys...)
+			child.vals = append([]string{v}, child.vals...)
+			n.keys[i-1] = child.keys[0]
+		} else {
+			child.keys = append([]int{n.keys[i-1]}, child.keys...)
+			child.children = append([]*node{left.children[len(left.children)-1]}, child.children...)
+			n.keys[i-1] = left.keys[len(left.keys)-1]
+			left.keys = left.keys[:len(left.keys)-1]
+			left.children = left.children[:len(left.children)-1]
+		}
+		return
+	}
+
+	if i < len(n.children)-1 && len(n.children[i+1].keys) > tr.t-1 {
+		right := n.children[i+1]
+		if child.leaf {
+			k := right.keys[0]
+			v := right.vals[0]
+			right.keys = right.keys[1:]
+			right.vals = right.vals[1:]
+			child.keys = append(child.keys, k)
+			child.vals = append(child.vals, v)
+			n.keys[i] = right.keys[0]
+		} else {
+			child.keys = append(child.keys, n.keys[i])
+			child.children = append(child.children, right.children[0])
+			n.keys[i] = right.keys[0]
+			right.keys = right.keys[1:]
+			right.children = right.children[1:]
+		}
+		return
+	}
+
+	if i > 0 {
+		tr.merge(n, i-1)
+	} else {
+		tr.merge(n, 0)
+	}
+}
+
+// merge 把 n 的第 i 个孩子与其右兄弟（第 i+1 个）合并，
+// 同时移除 n.keys[i]。
+func (tr *Tree) merge(n *node, i int) {
+	left := n.children[i]
+	right := n.children[i+1]
+
+	if left.leaf {
+		left.keys = append(left.keys, right.keys...)
+		left.vals = append(left.vals, right.vals...)
+	} else {
+		left.keys = append(left.keys, n.keys[i])
+		left.keys = append(left.keys, right.keys...)
+		left.children = append(left.children, right.children...)
+	}
+
+	n.keys = append(n.keys[:i], n.keys[i+1:]...)
+	n.children = append(n.children[:i+1], n.children[i+2:]...)
 }
 
 // Scan 返回键落在 [lo, hi) 内的条目，按键升序。
 func (tr *Tree) Scan(lo, hi int) []Entry {
+	if lo >= hi {
+		return nil
+	}
 	var out []Entry
 	var walk func(n *node)
 	walk = func(n *node) {
 		if n.leaf {
 			for i, k := range n.keys {
-				if k >= lo && k <= hi {
+				if k >= lo && k < hi {
 					out = append(out, Entry{Key: k, Value: n.vals[i]})
 				}
 			}
@@ -192,16 +286,19 @@ func (tr *Tree) Diagnostics() Diagnostics {
 	return d
 }
 
-func lowerBound(a []int, x int) int {
-	return sort.SearchInts(a, x)
-}
-
 func upperBound(a []int, x int) int {
 	return sort.Search(len(a), func(i int) bool { return a[i] > x })
 }
 
 func insertInt(a []int, i, v int) []int {
 	a = append(a, 0)
+	copy(a[i+1:], a[i:])
+	a[i] = v
+	return a
+}
+
+func insertNode(a []*node, i int, v *node) []*node {
+	a = append(a, nil)
 	copy(a[i+1:], a[i:])
 	a[i] = v
 	return a
